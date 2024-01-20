@@ -1,0 +1,110 @@
+name: "CI/CD"
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - 'src/**'
+      - '.eslintignore'
+      - '.eslintrc.js'
+      - '.graphqlconfig.yml'
+      - '.prettierrc'
+      - 'next-env.d.ts'
+      - 'next.config.js'
+      - 'package-lock.json'
+      - 'package.json'
+      - 'tsconfig.json'
+      - 'CHANGELOG.md'
+      - '.github/workflows/**'
+  pull_request:
+    branches: [ "dependabot/**", "dev/**" ]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [ 18.x ]
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v3
+
+      - name: 'Place dummy aws-exports'
+        run: cp src/aws-exports.js.sample src/aws-exports.js
+
+      - name: 'Place dummy amplifyconfiguration'
+        run: cp src/amplifyconfiguration.json.sample src/amplifyconfiguration.json
+
+      - name: 'Use Node.js ${{ matrix.node-version }}'
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: 'Perform install'
+        run: npm install
+
+      - name: 'Try building'
+        run: npm run build
+
+  release:
+    runs-on: ubuntu-latest
+    needs: build
+    strategy:
+      matrix:
+        node-version: [ 18.x ]
+    outputs:
+      releaseTag: ${{ steps.semver.outputs.next }}
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.head_ref }}   # checkout the correct branch name
+          fetch-depth: 0                # fetch the whole repo history
+
+      - name: 'Get Next Version'
+        id: semver
+        uses: ietf-tools/semver-action@v1
+        with:
+          token: ${{ github.token }}
+          branch: main
+          minorList: 'feat,perf,refactor,docs,style,ci,chore,test,minor'
+          majorList: 'breaking, page, schema, high, critical, major'
+          patchList: 'fix,security,patch,Update, action'
+          skipInvalidTags: false
+          noVersionBumpBehavior: 'warn'
+
+      - name: 'Create Release'
+        uses: ncipollo/release-action@v1.12.0
+        with:
+          allowUpdates: true
+          draft: false
+          makeLatest: true
+          name: ${{ steps.semver.outputs.next }}
+          tag: ${{ steps.semver.outputs.next }}
+          body: Changelog Contents
+          token: ${{ github.token }}
+          commit: ${{ github.head_ref }}
+
+  amplify:
+    runs-on: ubuntu-latest
+    needs: release
+    strategy:
+      matrix:
+        node-version: [ 18.x ]
+    steps:
+      - name: 'Checkout Code'
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.head_ref }}   # checkout the correct branch name
+          fetch-depth: 0                # fetch the whole repo history
+      - name: 'Trigger AWS Amplify Build using cURL'
+        uses: imehedi/actions-awscli-v2@v1.0.19
+        with:
+          args: amplify start-job --region eu-central-1 --app-id ${{ secrets.AMPLIFY_APP_ID }} --branch-name main --job-type RELEASE --job-reason "Release ${{needs.release.outputs.releaseTag}}" --commit-id ${{ github.sha }}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: "eu-west-1"
